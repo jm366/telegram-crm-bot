@@ -25,6 +25,7 @@ from services.crm_extractor import (
     summarize_draft,
 )
 from services.crm.factory import get_adapter, adapter_info, get_provider_name
+from services.business_card import extract_lead_from_photo
 
 load_dotenv()
 
@@ -85,12 +86,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 Hi! I'm your voice-to-CRM intake bot.\n\n"
         f"Connected to: *{crm_name}*\n\n"
-        "Send me a voice memo about who you just met, and I'll:\n"
-        "1. 🎙 Transcribe it\n"
-        "2. 🧠 Extract lead info\n"
+        "Send me a voice memo or a photo of a business card, and I'll:\n"
+        "1. 🎙 Transcribe it / 📷 Read the card\n"
+        "2. � Extract lead info\n"
         "3. ❓ Ask for missing details\n"
         "4. 📝 Create a confirmed lead in your CRM\n\n"
-        "Try it now — record a voice message about someone you just spoke with!\n\n"
+        "Try it now — record a voice message or snap a business card!\n\n"
         "Commands: /help /status /crm"
     )
 
@@ -102,7 +103,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cancel — Cancel current intake\n"
         "/status — What am I waiting for?\n"
         "/crm — Check CRM connection\n\n"
-        "Just send a voice memo anytime!"
+        "Send a voice memo 📷 or a business card photo anytime!"
     )
 
 
@@ -202,11 +203,66 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     field = missing[0]
     question = await generate_followup_question(lead_data, field, transcript)
 
-    summary = summarize_draft(lead_data)
+    summary = await summarize_draft(lead_data)
     text = (
         f"I found this so far:\n\n{summary}\n\n"
         f"⏳ I still need a few more details. {question}\n\n"
         "(You can reply with text or send another voice memo.)"
+    )
+    await progress.edit_text(text)
+    return STATE_COLLECTING
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User sends a photo of a business card."""
+    chat_id = update.effective_chat.id
+    photo = update.message.photo
+
+    if not photo:
+        await update.message.reply_text("📷 I need a photo to read a business card. Please upload one!")
+        return STATE_IDLE
+
+    # Get the largest version
+    file = await context.bot.get_file(photo[-1].file_id)
+    tmp_path = os.path.join(tempfile.gettempdir(), f"card_{chat_id}_{photo[-1].file_id}.jpg")
+    await file.download_to_drive(tmp_path)
+
+    progress = await update.message.reply_text("📷 Analysing business card...")
+
+    try:
+        lead_data, raw = await extract_lead_from_photo(tmp_path)
+    except Exception as e:
+        logger.error("Photo extraction failed: %s", e)
+        await progress.edit_text("❌ Couldn't read that business card. Try a clearer photo or send a voice memo instead.")
+        return STATE_IDLE
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+    await progress.edit_text("🔍 Extracted data from card! Drafting...")
+
+    missing = get_missing_fields(lead_data)
+    store.set_transcript(chat_id, "(Photo of business card)")
+    store.set_lead(chat_id, lead_data)
+    store.set_missing(chat_id, missing)
+
+    logger.info("Extracted card lead for chat %s: %s | missing: %s", chat_id, lead_data, missing)
+
+    if not missing:
+        return await _send_confirm(update, context, chat_id)
+
+    store.set_state(chat_id, STATE_COLLECTING)
+    field = missing[0]
+    # Reuse the transcript-aware follow-up generator, but with the card context instead
+    question = await generate_followup_question(lead_data, field, "Business card photo")
+
+    summary = await summarize_draft(lead_data)
+    text = (
+        f"I read the card and found this:\n\n{summary}\n\n"
+        f"⏳ I still need a few more details. {question}\n\n"
+        "(Just reply with text.)"
     )
     await progress.edit_text(text)
     return STATE_COLLECTING
@@ -220,7 +276,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     if state == STATE_IDLE:
-        await update.message.reply_text("Send me a voice memo to start lead intake, or use /start")
+        await update.message.reply_text("Send me a voice memo or a photo of a business card to start lead intake, or use /start")
         return STATE_IDLE
 
     if state == STATE_COLLECTING:
@@ -253,7 +309,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         next_field = missing[0]
         question = await generate_followup_question(lead, next_field, data["transcript"])
-        summary = summarize_draft(lead)
+        summary = await summarize_draft(lead)
         await update.message.reply_text(
             f"👍\n\n{summary}\n\n❓ {question}"
         )
@@ -309,7 +365,7 @@ async def _send_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, chat
     """Send confirmation draft with buttons."""
     store.set_state(chat_id, STATE_CONFIRM)
     lead = store.get(chat_id)["lead"]
-    summary = summarize_draft(lead)
+    summary = await summarize_draft(lead)
 
     keyboard = [
         [InlineKeyboardButton("✅ Confirm — Save to CRM", callback_data="action:confirm")],
@@ -396,11 +452,13 @@ def main():
         entry_points=[
             CommandHandler("start", start),
             MessageHandler(filters.VOICE | filters.AUDIO, handle_voice),
+            MessageHandler(filters.PHOTO, handle_photo),
         ],
         states={
             STATE_COLLECTING: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text),
                 MessageHandler(filters.VOICE | filters.AUDIO, handle_voice),
+                MessageHandler(filters.PHOTO, handle_photo),
             ],
             STATE_CONFIRM: [
                 CallbackQueryHandler(callback_handler),
