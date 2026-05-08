@@ -9,11 +9,16 @@ VISION_SYSTEM_PROMPT = """You are a business card OCR + CRM data extraction assi
 
 smartics.io is a UAE-based company selling SCADA, BMS, IoT, building energy management, and AI optimization solutions. They have case studies with Mitsubishi and Bahamas.
 
-Your job: look at a business card photo and extract structured lead data.
+Your job: look at a business card photo and extract structured lead data for Zoho CRM (Contact + Deal modules).
 
 RULES:
 1. Extract ALL information visible on the card. Use null or "" for missing fields.
-2. Be smart about inference — job titles may be abbreviated (e.g. "MD" = Managing Director).
+2. Be smart about inference:
+   - Job titles may be abbreviated (e.g. "MD" = Managing Director, "Eng" = Engineer).
+   - Infer contact_type from title: CEO/MD/Owner/VP = Decision Maker, Engineer/Manager = Influencer, Consultant/Procurement = Procurement.
+   - If company size is mentioned or inferable from company name/logo, record it.
+   - Deal_name: if not stated, auto-generate as "Company - Industry - Location".
+   - Deal_stage: default to "New Inquiry" unless there's evidence of an active proposal.
 3. Assess segment automatically:
    - hot: direct fit for SCADA/BMS/IoT — decision maker at industrial/manufacturing/building company
    - warm: interest but not clearly active buyer
@@ -25,7 +30,9 @@ RULES:
 6. next_step: recommend one concrete follow-up action
 7. Return strictly valid JSON matching the schema. Do not add fields."""
 
-EXTRACTION_SCHEMA_DESCRIPTION = """Extract structured lead data. Fields:
+EXTRACTION_SCHEMA_DESCRIPTION = """Extract structured lead data aligned with Zoho CRM Contact + Deal modules.
+
+Contact fields:
 - first_name (string): person's first name
 - last_name (string): surname
 - title (string): job title (expand abbreviations)
@@ -33,14 +40,22 @@ EXTRACTION_SCHEMA_DESCRIPTION = """Extract structured lead data. Fields:
 - email (string): email address
 - phone (string): phone number(s). Prefer mobile if multiple.
 - industry (string): industry sector if inferable
+- address (string): office address
+- country (string): country
+- city (string): city
 - notes (string): extra context, verbatim text from card
-- segment (string): one of "hot", "warm", "partner", "learn", "low_priority"
-- fit_score (integer): 0-100
-- intent_score (integer): 0-100
-- next_step (string): recommended follow-up action
-- confidence (number): 0.0-1.0
-- tags (array of strings): relevant keywords like "cnc", "machining", "bms", "automation"
-- linkedin (string): LinkedIn URL if present on card"""
+- contact_type (string): "Decision Maker", "Influencer", "Technical", "Procurement", or "Unknown"
+- company_size (string): company size if inferable
+
+Deal fields:
+- deal_name (string): format as "Company - Industry - Location" if not stated
+- deal_stage (string): one of "New Inquiry", "Discovery", "Proposal", "Negotiation", "Closed Won", "Closed Lost"
+- closing_date (string): expected close date as YYYY-MM-DD
+- expected_revenue (string): amount with currency, e.g. "150,000 AED"
+- campaign_source (string): where lead came from (e.g. "ADIPEC", "LinkedIn")
+- project_start_date (string): when project starts, YYYY-MM-DD
+
+Always infer from visual cues and card design. Return strictly valid JSON."""
 
 
 def _image_to_base64(image_path: str) -> str:

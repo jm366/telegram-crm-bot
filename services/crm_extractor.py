@@ -10,17 +10,24 @@ REQUIRED_FIELDS = ["first_name", "company"]
 # Fields that are desirable for a complete lead record
 DESIRED_FIELDS = [
     "last_name", "email", "phone", "title", "industry",
-    "notes", "segment", "fit_score", "intent_score", "next_step"
+    "notes", "segment", "fit_score", "intent_score", "next_step",
+    "contact_type", "closing_date", "expected_revenue", "campaign_source", "company_size"
 ]
 
 EXTRACTION_SYSTEM_PROMPT = """You are a CRM lead extraction assistant for smartics.io — a UAE-based company selling SCADA, BMS, IoT, building energy management, and AI optimization solutions. They have case studies with Mitsubishi and Bahamas.
 
-Your job: parse unstructured voice transcripts and output structured JSON.
+Your job: parse unstructured voice transcripts and business card images and output structured JSON matching the Zoho CRM schema.
 
 RULES:
-1. Extract ALL information you can find. Use null or \"\" for missing fields.
-2. Be smart about inference from context — if someone says \"I'm the technical director at GESATCO\" infer title=technical director and company=GESATCO.
-3. Assess segment automatically based on this vocabulary:
+1. Extract ALL information you can find. Use null or "" for missing fields.
+2. Be smart about inference from context:
+   - If someone says "I'm the technical director at GESATCO" infer title=technical director and company=GESATCO.
+   - Infer Contact_Type from titles: "CEO/MD/Owner/VP" = Decision Maker, "Engineer/Manager (non-VP)" or "Technical" = Influencer, "Consultant/Procurement" = Procurement.
+   - If revenue is mentioned ("80K project", "200K dirham budget"), record it in expected_revenue with currency (AED if UAE location). Convert shorthand: 80K = 80,000 AED.
+   - If timing is mentioned ("start end of year", "closing Q1", "project in 2 months"), estimate closing_date as YYYY-MM-DD.
+   - If source is mentioned ("we met at ADIPEC", "referral from Ahmad"), record in campaign_source.
+   - Deal_name should be derived automatically if not stated: format as "Name - Industry - Location" (e.g. "Acme Corp - Oil & Gas - Dubai").
+3. Assess segment automatically:
    - hot: direct fit for SCADA/BMS/IoT — decision maker at industrial/manufacturing/building company
    - warm: interest but not clearly active buyer
    - partner: reseller/integrator
@@ -31,19 +38,23 @@ RULES:
 6. next_step: recommend one concrete follow-up action
 7. Return strictly valid JSON matching the schema. Do not add fields."""
 
-FOLLOWUP_SYSTEM_PROMPT = """You are a friendly Telegram CRM assistant helping John Mark (smartics.io MD). You just extracted partial lead data from a voice memo.
+FOLLOWUP_SYSTEM_PROMPT = """You are a friendly Telegram CRM assistant helping John Mark (smartics.io MD). You just extracted partial lead data from a voice memo or business card photo.
 
 Your job: ask ONE concise follow-up question to get a specific missing field. Keep it friendly and professional.
 
 GUIDELINES:
 - Ask only for the single most important missing field.
-- If the person's name is missing, ask \"What's this person's first name?\"
-- If company is missing, ask \"Which company do they work for?\"
-- If email is missing, ask \"Do you have their email?\"
-- If phone is missing, ask \"Their phone or WhatsApp number?\"
-- If industry is missing, ask \"What industry are they in — manufacturing, oil & gas, etc.?\"
+- If the person's name is missing, ask "What's this person's first name?"
+- If company is missing, ask "Which company do they work for?"
+- If email is missing, ask "Do you have their email?"
+- If phone is missing, ask "Their phone or WhatsApp number?"
+- If industry is missing, ask "What industry are they in — manufacturing, oil & gas, etc.?"
+- If contact_type is missing, ask "What's their role — Decision Maker, Technical, Procurement, Influencer?"
+- If closing_date is missing, ask "When does this project need to close by? (or rough timeline)"
+- If expected_revenue is missing, ask "What's the approximate project budget or value?"
+- If campaign_source is missing, ask "Where did you meet this lead? (e.g., ADIPEC, LinkedIn, referral)"
 - Reference what you already know so the user knows you're building context.
-- If nothing is missing, say \"Looking good — I think I have all I need! ✅\"
+- If nothing is missing, say "Looking good — I think I have all I need! ✅"
 
 Respond in a single short sentence."""
 
@@ -120,14 +131,29 @@ async def generate_followup_question(known_fields: Dict[str, any], missing_field
 async def summarize_draft(fields: Dict[str, any]) -> str:
     """Generate a draft summary for user confirmation."""
     lines = []
-    keys = ["first_name", "last_name", "title", "company", "email", "phone", "industry", "address", "notes", "segment", "fit_score", "intent_score", "next_step"]
-    for k in keys:
+    # Contact info
+    contact_keys = ["first_name", "last_name", "title", "company", "email", "phone", "industry", "address", "country", "city", "contact_type"]
+    for k in contact_keys:
         v = fields.get(k)
         if v:
             label = k.replace("_", " ").title()
             lines.append(f"• {label}: {v}")
-    total = 0
-    if "fit_score" in fields and "intent_score" in fields:
-        total = (fields["fit_score"] or 0) + (fields["intent_score"] or 0)
-    lines.append(f"\nOverall Score: {total}/200")
+    # Deal info
+    deal_keys = ["deal_name", "deal_stage", "closing_date", "expected_revenue", "campaign_source", "project_start_date"]
+    for k in deal_keys:
+        v = fields.get(k)
+        if v:
+            label = k.replace("_", " ").title()
+            lines.append(f"• {label}: {v}")
+    # Scoring
+    if "fit_score" in fields:
+        lines.append(f"• Fit Score: {fields['fit_score']} / 100")
+    if "intent_score" in fields:
+        lines.append(f"• Intent Score: {fields['intent_score']} / 100")
+    # Notes and next step
+    for k in ["notes", "next_step"]:
+        v = fields.get(k)
+        if v:
+            label = k.replace("_", " ").title()
+            lines.append(f"• {label}: {v}")
     return "\n".join(lines)

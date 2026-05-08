@@ -1,29 +1,24 @@
 """Zoho CRM (v6) adapter via OAuth2 REST API.
 
-Docs: https://desk.zoho.com/portal/apideveloper/home
-OAuth: https://console.zoho.com/
+Creates BOTH a Lead (Contact) and a linked Deal on extraction.
 
-Requires env vars:
-  ZOHO_CLIENT_ID
-  ZOHO_CLIENT_SECRET
-  ZOHO_REFRESH_TOKEN
-  ZOHO_OAUTH_TOKEN_FILE   # optional, defaults to ./.zoho_tokens.json
-
-The token file caches access_token + expiry to avoid excessive refresh calls.
+Required env:
+  ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, ZOHO_REFRESH_TOKEN,
+  ZOHO_DC (us/eu/in/cn/au/jp)
 """
 
 import os
 import json
-import time
 import logging
 import asyncio
 import aiohttp
+import time
 from typing import Dict, Any, Optional
 from services.crm.base import CRMAdapter
 
 logger = logging.getLogger(__name__)
 
-ZOHO_ACCOUNTS_BASE_URLS = {
+ZOHO_ACCOUNTS_URLS = {
     "us": "https://accounts.zoho.com",
     "eu": "https://accounts.zoho.eu",
     "in": "https://accounts.zoho.in",
@@ -32,7 +27,7 @@ ZOHO_ACCOUNTS_BASE_URLS = {
     "jp": "https://accounts.zoho.jp",
 }
 
-ZOHO_API_BASE_URLS = {
+ZOHO_API_URLS = {
     "us": "https://www.zohoapis.com",
     "eu": "https://www.zohoapis.eu",
     "in": "https://www.zohoapis.in",
@@ -41,167 +36,228 @@ ZOHO_API_BASE_URLS = {
     "jp": "https://www.zohoapis.jp",
 }
 
+
+def _zoho_picklist(value: str, picklist: list) -> str:
+    """Map a free-form value to the closest Zoho picklist option."""
+    if not value:
+        return picklist[0]  # default
+    v = value.strip().lower()
+    for opt in picklist:
+        if v == opt.lower():
+            return opt
+    # Fuzzy fallback
+    if v in ("decision maker", "decision_maker", "owner", "ceo", "md", "vp"):
+        return "Decision Maker"
+    if v in ("technical", "engineer", "architect"):
+        return "Technical"
+    if v in ("influencer", "manager"):
+        return "Influencer"
+    if v in ("procurement", "purchaser", "buyer"):
+        return "Procurement"
+    if "negotiation" in v:
+        return "Negotiation"
+    if "proposal" in v:
+        return "Proposal"
+    if "discovery" in v:
+        return "Discovery"
+    if "close" in v or "won" in v:
+        return "Closed Won"
+    return picklist[0]
+
+
 class ZohoCrmAdapter(CRMAdapter):
-    def __init__(
-        self,
-        client_id: Optional[str] = None,
-        client_secret: Optional[str] = None,
-        refresh_token: Optional[str] = None,
-        dc: str = "us",
-    ):
-        self.client_id = client_id or os.getenv("ZOHO_CLIENT_ID", "")
-        self.client_secret = client_secret or os.getenv("ZOHO_CLIENT_SECRET", "")
-        self.refresh_token = refresh_token or os.getenv("ZOHO_REFRESH_TOKEN", "")
-        self.dc = dc or os.getenv("ZOHO_DC", "us")
-        self.token_file = os.getenv("ZOHO_OAUTH_FILE", os.path.join(os.path.dirname(__file__), "..", "..", ".zoho_tokens.json"))
+    """Zoho adapter: writes a Lead (Contacts) and optionally a Deal."""
+
+    def __init__(self, dc: Optional[str] = None):
+        self.client_id = os.getenv("ZOHO_CLIENT_ID", "")
+        self.client_secret = os.getenv("ZOHO_CLIENT_SECRET", "")
+        self.refresh_token = os.getenv("ZOHO_REFRESH_TOKEN", "")
+        self.dc = (dc or os.getenv("ZOHO_DC", "us")).lower()
         self._token: Optional[str] = None
-        self._token_expiry: float = 0  # unix epoch
+        self._token_expiry: float = 0
 
-    # ── Token management ──
-
-    def _load_cached_token(self) -> Optional[str]:
-        try:
-            with open(self.token_file, "r") as f:
-                data = json.load(f)
-            expiry = data.get("expires_at", 0)
-            if time.time() < expiry - 60:  # 60s buffer
-                self._token = data.get("access_token")
-                self._token_expiry = expiry
-                return self._token
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-        return None
-
-    def _save_token(self, token: str, expires_in: int):
-        self._token = token
-        self._token_expiry = time.time() + expires_in
-        try:
-            with open(self.token_file, "w") as f:
-                json.dump({"access_token": token, "expires_at": self._token_expiry}, f)
-        except Exception as e:
-            logger.warning("Could not cache Zoho token: %s", e)
-
-    async def _get_access_token(self) -> str:
-        cached = self._token or self._load_cached_token()
-        if cached and time.time() < self._token_expiry - 120:
-            return cached
-        return await self._refresh_access_token()
+    # ── Token ──
 
     async def _refresh_access_token(self) -> str:
-        """POST to Zoho accounts OAuth endpoint."""
-        if not self.client_id or not self.client_secret or not self.refresh_token:
-            raise RuntimeError("Zoho credentials missing. Set ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, ZOHO_REFRESH_TOKEN.")
-        acc_url = ZOHO_ACCOUNTS_BASE_URLS.get(self.dc, ZOHO_ACCOUNTS_BASE_URLS["us"])
-        url = f"{acc_url}/oauth/v2/token"
+        acc = ZOHO_ACCOUNTS_URLS.get(self.dc, ZOHO_ACCOUNTS_URLS["us"])
+        url = f"{acc}/oauth/v2/token"
         data = {
             "refresh_token": self.refresh_token,
             "client_id": self.client_id,
             "client_secret": self.client_secret,
             "grant_type": "refresh_token",
         }
-        async with aiohttp.ClientSession() as sess:
-            async with sess.post(url, data=data, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                body = await resp.json()
+        async with aiohttp.ClientSession() as s:
+            async with s.post(url, data=data, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                body = await r.json()
         if "access_token" not in body:
             raise RuntimeError(f"Zoho token refresh failed: {body}")
-        self._save_token(body["access_token"], body.get("expires_in", 3600))
-        return body["access_token"]
+        self._token = body["access_token"]
+        self._token_expiry = time.time() + body.get("expires_in", 3600)
+        return self._token
 
-    # ── CRMAdapter interface ──
+    async def _access_token(self) -> str:
+        if self._token and time.time() < self._token_expiry - 120:
+            return self._token
+        return await self._refresh_access_token()
+
+    # ── CRMAdapter ──
 
     async def health_check(self) -> bool:
-        """Quick fetch of current user."""
         try:
-            token = await self._get_access_token()
-            api_base = ZOHO_API_BASE_URLS.get(self.dc, ZOHO_API_BASE_URLS["us"])
-            url = f"{api_base}/crm/v6/users"
-            headers = {"Authorization": f"Zoho-oauthtoken {token}"}
-            async with aiohttp.ClientSession() as sess:
-                async with sess.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    return resp.status < 400
+            token = await self._access_token()
+            api = ZOHO_API_URLS.get(self.dc, ZOHO_API_URLS["us"])
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    f"{api}/crm/v6/settings/modules/Contacts",
+                    headers={"Authorization": f"Zoho-oauthtoken {token}"},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as r:
+                    return r.status < 400
         except Exception:
             return False
 
     async def write_lead(self, fields: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a Zoho CRM Lead with normalized fields."""
-        token = await self._get_access_token()
-        api_base = ZOHO_API_BASE_URLS.get(self.dc, ZOHO_API_BASE_URLS["us"])
-        url = f"{api_base}/crm/v6/Leads"
-        headers = {
-            "Authorization": f"Zoho-oauthtoken {token}",
-            "Content-Type": "application/json",
+        """Create Contact + Deal. Return unified result."""
+        token = await self._access_token()
+        api = ZOHO_API_URLS.get(self.dc, ZOHO_API_URLS["us"])
+        hdrs = {"Authorization": f"Zoho-oauthtoken {token}", "Content-Type": "application/json"}
+
+        # ── 1. Create Contact (mapped from lead fields) ──
+        contact = self._build_contact(fields)
+        contact_resp = await self._post(api, "/crm/v6/Contacts", hdrs, contact)
+        contact_id = self._extract_id(contact_resp)
+
+        # ── 2. Create Deal linked to Contact if deal_name present ──
+        deal_id = None
+        deal_resp = None
+        if fields.get("deal_name"):
+            deal_data = self._build_deal(fields, contact_id)
+            deal_resp = await self._post(api, "/crm/v6/Deals", hdrs, deal_data)
+            deal_id = self._extract_id(deal_resp)
+
+        # ── 3. Build response ──
+        base_url = "https://crm.zoho.com"
+        if self.dc != "us":
+            base_url = f"https://crm.zoho.{self.dc}"
+
+        res = {
+            "ok": True,
+            "contact_id": contact_id,
+            "deal_id": deal_id,
+            "url": f"{base_url}/crm/{self.dc}/tab/Contacts/{contact_id}" if contact_id else None,
+            "deal_url": f"{base_url}/crm/{self.dc}/tab/Deals/{deal_id}" if deal_id else None,
+            "error": None,
+            "raw_contact": contact_resp,
+            "raw_deal": deal_resp,
         }
 
-        # Map normalized fields → Zoho CRM field API names
-        # See https://www.zoho.com/crm/help/customer-center/api/leads.html
-        zoho_data = {}
+        # If Contact creation failed, report failure
+        if not contact_id:
+            err = contact_resp.get("data", [{}])[0].get("message", "Contact creation failed")
+            res["ok"] = False
+            res["error"] = err
 
-        def set_if_present(key: str, value: Any):
-            if value is not None and str(value).strip():
-                zoho_data[key] = str(value).strip()
+        return res
 
-        set_if_present("First_Name", fields.get("first_name"))
-        set_if_present("Last_Name", fields.get("last_name") or "Unknown")  # required
-        set_if_present("Email", fields.get("email"))
-        set_if_present("Phone", fields.get("phone"))
-        set_if_present("Mobile", fields.get("mobile"))
-        set_if_present("Industry", fields.get("industry"))
-        set_if_present("Company", fields.get("company"))
-        set_if_present("Title", fields.get("title"))
-        set_if_present("Street", fields.get("address"))
-        set_if_present("City", fields.get("city"))
-        set_if_present("Country", fields.get("country"))
-        set_if_present("Description", fields.get("notes"))
-        set_if_present("Lead_Source", fields.get("source_channel"))
-        set_if_present("Website", fields.get("company_website"))
-        set_if_present("LinkedIn", fields.get("linkedin"))
+    # ── Helpers ──
 
-        # Custom fields for smartics scoring
-        if fields.get("fit_score") is not None:
-            zoho_data.setdefault("Lead_Score", int(fields["fit_score"]))
-        if fields.get("intent_score") is not None:
-            zoho_data.setdefault("Priority", "High" if fields["intent_score"] > 70 else "Normal")
+    def _build_contact(self, f: Dict[str, Any]) -> Dict[str, Any]:
+        def s(k: str, vkey: Optional[str] = None):
+            val = f.get(vkey or k)
+            if val is not None and str(val).strip():
+                # Special handling for Contact_Type picklist
+                if k == "Contact_Type":
+                    d[k] = _zoho_picklist(str(val), ["Decision Maker", "Technical", "Influencer", "Procurement", "Unknown"])
+                else:
+                    d[k] = str(val).strip()
+        d: Dict[str, Any] = {}
+        s("First_Name", "first_name")
+        last = f.get("last_name", "Unknown")
+        if not last:
+            last = "Unknown"
+        d["Last_Name"] = str(last).strip()
+        s("Email", "email")
+        s("Phone", "phone")
+        s("Mobile", "mobile")
+        s("Title", "title")
+        s("Company", "company")
+        s("Industry", "industry")
+        s("Street", "address")
+        s("City", "city")
+        s("Country", "country")
+        s("Description", "notes")
+        s("Lead_Source", "source_channel")
+        s("Lead_Source_Description", "campaign_source")
+        s("Website", "company_website")
+        s("LinkedIn", "linkedin")
+        s("Contact_Type", "contact_type")
+        # Custom size field mapped to Company context
+        if f.get("company_size"):
+            d.setdefault("No_of_Employees", str(f["company_size"]).strip())
+        if f.get("fit_score") is not None:
+            d.setdefault("Lead_Score", int(f["fit_score"]))
+        if f.get("segment"):
+            d.setdefault("Tag", str(f["segment"]))
+        return d
 
-        # Segment as Tag (if available in Zoho)
-        segment = fields.get("segment")
-        if segment:
-            # Zoho Tags are separate API; let's just store in Lead_Source_Description custom field if available
-            zoho_data.setdefault("Lead_Source_Description", f"Segment: {segment}")
+    def _build_deal(self, f: Dict[str, Any], contact_id: Optional[str]) -> Dict[str, Any]:
+        d: Dict[str, Any] = {}
+        # Deal Name
+        deal_name = f.get("deal_name")
+        if not deal_name:
+            # Auto-generate: "Company - Industry - Location"
+            parts = []
+            if f.get("company"):
+                parts.append(str(f["company"]))
+            if f.get("industry"):
+                parts.append(str(f["industry"]))
+            loc = f.get("city") or f.get("country")
+            if loc:
+                parts.append(str(loc))
+            deal_name = " - ".join(parts) if parts else "New Lead"
+        d["Deal_Name"] = deal_name
 
-        payload = {"data": [zoho_data], "trigger": ["approval", "workflow", "blueprint"]}
+        # Stage picklist
+        stage = f.get("deal_stage", "New Inquiry")
+        d["Stage"] = _zoho_picklist(
+            stage,
+            ["New Inquiry", "Discovery", "Proposal", "Negotiation", "Closed Won", "Closed Lost"]
+        )
+        if f.get("closing_date"):
+            d["Closing_Date"] = str(f["closing_date"])
+        if f.get("expected_revenue"):
+            # Strip currency symbols for numeric field
+            rev = str(f["expected_revenue"])
+            for ch in ", AED USD $":
+                rev = rev.replace(ch, "")
+            try:
+                d["Expected_Revenue"] = float(rev.strip())
+            except ValueError:
+                d["Expected_Revenue"] = f["expected_revenue"]
+        if f.get("campaign_source"):
+            d["Campaign_Source"] = str(f["campaign_source"])
+        if f.get("product_interest"):
+            d["Product_Interest"] = str(f["product_interest"])
+        if contact_id:
+            d["Contact_Name"] = {"id": contact_id}
+        return d
 
-        async with aiohttp.ClientSession() as sess:
-            async with sess.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                body = await resp.json()
-                logger.info("Zoho response status=%s body=%s", resp.status, body)
+    async def _post(self, api_base: str, path: str, hdrs: Dict, data: Dict) -> Dict:
+        url = f"{api_base}{path}"
+        payload = {"data": [data], "trigger": ["approval", "workflow", "blueprint"]}
+        async with aiohttp.ClientSession() as s:
+            async with s.post(url, headers=hdrs, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                body = await r.json()
+        logger.info("Zoho POST %s -> status=%s", path, r.status)
+        return body
 
-        # Parse response
-        if body.get("data") and len(body["data"]) > 0:
-            record = body["data"][0]
-            if record.get("status") == "success":
-                crm_id = record.get("details", {}).get("id")
-                # Zoho lead detail URL
-                lead_url = f"https://crm.zoho.com/crm/tab/Leads/{crm_id}" if crm_id else None
-                return {
-                    "ok": True,
-                    "id": crm_id,
-                    "url": lead_url,
-                    "error": None,
-                    "raw": body,
-                }
-            else:
-                return {
-                    "ok": False,
-                    "id": None,
-                    "url": None,
-                    "error": record.get("message", "Zoho returned error"),
-                    "raw": body,
-                }
-
-        return {
-            "ok": False,
-            "id": None,
-            "url": None,
-            "error": body.get("message", "Unexpected Zoho response"),
-            "raw": body,
-        }
+    @staticmethod
+    def _extract_id(response: Dict) -> Optional[str]:
+        try:
+            rec = response["data"][0]
+            if rec.get("status") == "success":
+                return rec.get("details", {}).get("id")
+        except Exception:
+            pass
+        return None
