@@ -23,6 +23,8 @@ from services.crm_extractor import (
     get_missing_fields,
     generate_followup_question,
     summarize_draft,
+    REQUIRED_FIELDS,
+    DESIRED_FIELDS,
 )
 from services.crm.factory import get_adapter, adapter_info, get_provider_name
 from services.business_card import extract_lead_from_photo
@@ -388,7 +390,9 @@ first_name, last_name, email, phone, title, company, industry, address, city, co
 
 
 async def _send_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Send confirmation draft with buttons."""
+    """Send confirmation draft with buttons.
+    
+    Works both from direct messages and from callback queries."""
     store.set_state(chat_id, STATE_CONFIRM)
     lead = store.get(chat_id)["lead"]
     summary = await summarize_draft(lead)
@@ -407,7 +411,12 @@ async def _send_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, chat
         "─────────────────────\n\n"
         "Does this look right?"
     )
-    await update.message.reply_text(text, reply_markup=markup)
+    
+    # Support both message context and callback query context
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=markup)
+    else:
+        await update.message.reply_text(text, reply_markup=markup)
     return STATE_CONFIRM
 
 
@@ -567,6 +576,7 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text),
             ],
             STATE_COLLECTING: [
+                CallbackQueryHandler(callback_handler),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text),
                 MessageHandler(filters.VOICE | filters.AUDIO, handle_voice),
                 MessageHandler(filters.PHOTO, handle_photo),
