@@ -6,9 +6,15 @@ A Telegram bot that accepts voice messages about people you meet, transcribes th
 
 ## Supported CRMs
 
-- ✅ **Zoho CRM** (v6 REST API via OAuth2)
-- ✅ **GTM-OS** (local SQLite)
-- 🧩 **Easy to add**: HubSpot, Pipedrive, Salesforce, etc. — just implement `services/crm/base.py`
+| CRM | Provider Key | Auth |
+|-----|-------------|------|
+| ✅ **Zoho CRM** | `zoho` | OAuth2 (refresh token) |
+| ✅ **HubSpot** | `hubspot` | Private App Access Token |
+| ✅ **Pipedrive** | `pipedrive` | API Token |
+| ✅ **Salesforce** | `salesforce` | OAuth2 (refresh token) |
+| ✅ **Bitrix24** | `bitrix24` | Webhook URL or OAuth2 |
+| ✅ **Odoo** | `odoo` | JSON-RPC (API key) |
+| ✅ **GTM-OS** | `gtm-os` | Local SQLite (default) |
 
 ## How It Works
 
@@ -40,23 +46,71 @@ python bot.py
 |----------|----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes | From @BotFather |
 | `OPENAI_API_KEY` | Yes | From OpenAI dashboard |
-| `CRM_PROVIDER` | No | `zoho` or `gtm-os` (default: `gtm-os`) |
+| `CRM_PROVIDER` | No | `zoho`, `hubspot`, `pipedrive`, `salesforce`, `bitrix24`, `odoo`, or `gtm-os` (default) |
 
-### Zoho CRM-specific
+### Zoho CRM
 
-| Variable | For | How to get |
-|----------|-----|------------|
-| `ZOHO_CLIENT_ID` | OAuth app ID | [console.zoho.com](https://console.zoho.com) → Client for Server-based Applications |
-| `ZOHO_CLIENT_SECRET` | OAuth app secret | Same as above |
-| `ZOHO_REFRESH_TOKEN` | Long-lived token | Generate via [Self Client](https://www.zoho.com/accounts/protocol/oauth/self-client.html) with scope `ZohoCRM.modules.ALL` |
-| `ZOHO_DC` | No | Data center: `us` (default), `eu`, `in`, `cn`, `au`, `jp` |
+| Variable | How to get |
+|----------|------------|
+| `ZOHO_CLIENT_ID` | [console.zoho.com](https://console.zoho.com) → Self Client |
+| `ZOHO_CLIENT_SECRET` | Same as above |
+| `ZOHO_REFRESH_TOKEN` | Generate with scope `ZohoCRM.modules.ALL` |
+| `ZOHO_DC` | Data center: `us`, `eu`, `in`, `cn`, `au`, `jp` |
 
-### GTM-OS-specific
+### HubSpot
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GTMO_DB_PATH` | No | Absolute path to `gtm.db` |
-| `GTMO_APP_URL` | No | Base URL for lead deeplinks |
+| Variable | How to get |
+|----------|------------|
+| `HUBSPOT_ACCESS_TOKEN` | Settings → Integrations → Private Apps → Create token |
+
+### Pipedrive
+
+| Variable | How to get |
+|----------|------------|
+| `PIPEDRIVE_API_TOKEN` | Settings → Personal Preferences → API |
+| `PIPEDRIVE_DOMAIN` | Your company subdomain (e.g. `smartics` for smartics.pipedrive.com) |
+
+### Salesforce
+
+| Variable | How to get |
+|----------|------------|
+| `SFDC_CLIENT_ID` | Setup → App Manager → Connected App → Consumer Key |
+| `SFDC_CLIENT_SECRET` | Consumer Secret from same page |
+| `SFDC_REFRESH_TOKEN` | OAuth flow with scope `api refresh_token` |
+| `SFDC_INSTANCE_URL` | e.g. `https://yourinstance.my.salesforce.com` |
+
+### Bitrix24
+
+**Webhook mode** (easiest for cloud):
+
+| Variable | How to get |
+|----------|------------|
+| `BITRIX_WEBHOOK_URL` | Applications → Webhooks → Inbound webhook → copy full URL |
+
+**OAuth mode** (on-premise):
+
+| Variable | How to get |
+|----------|------------|
+| `BITRIX_CLIENT_ID` | Applications → OAuth → Client ID |
+| `BITRIX_CLIENT_SECRET` | Applications → OAuth → Client Secret |
+| `BITRIX_REFRESH_TOKEN` | OAuth flow |
+| `BITRIX_DOMAIN` | Your portal URL |
+
+### Odoo
+
+| Variable | How to get |
+|----------|------------|
+| `ODOO_URL` | Your Odoo instance URL |
+| `ODOO_DB` | Database name |
+| `ODOO_USERNAME` | Login email |
+| `ODOO_PASSWORD` | Settings → Users → API Keys (not your login password!) |
+
+### GTM-OS (local SQLite)
+
+| Variable | Description |
+|----------|-------------|
+| `GTMO_DB_PATH` | Absolute path to `gtm.db` |
+| `GTMO_APP_URL` | Base URL for lead deeplinks |
 
 ## Architecture
 
@@ -81,41 +135,35 @@ python bot.py
 │ generator    │
 └──────┬───────┘
        │ user confirms
-┌──────▼───────┐     ┌──────────────┐
-│ CRM Adapter  │──▶│ Zoho / GTM-OS│
-│ (pluggable)  │     │ write lead   │
-└──────┬───────┘     └──────────────┘
-       │ CRM URL + ID
 ┌──────▼───────┐
-│ Telegram     │
-│ reply        │
-└──────────────┘
+│ CRM Adapter  │──────┐
+│ (pluggable)  │      ├─▶ Zoho CRM
+└──────┬───────┘      ├─▶ HubSpot
+       │               ├─▶ Pipedrive
+┌──────▼───────┐      ├─▶ Salesforce
+│ Telegram     │      ├─▶ Bitrix24
+│ reply        │      ├─▶ Odoo
+└──────────────┘      └─▶ GTM-OS
 ```
 
 ## Adding a New CRM Adapter
 
-Create a file in `services/crm/` that implements `CRMAdapter`:
+1. Create `services/crm/my_crm.py`
+2. Implement `CRMAdapter`:
 
 ```python
 from services.crm.base import CRMAdapter
 
 class MyCrmAdapter(CRMAdapter):
     async def health_check(self) -> bool:
-        # Ping API, return True if reachable
-        return True
+        return True  # ping your API
 
     async def write_lead(self, fields: dict) -> dict:
         # Create lead in your CRM
-        # Return {"ok": True, "id": "123", "url": "https://...", "error": None}
-        return {"ok": True, "id": "123", "url": None, "error": None}
+        return {"ok": True, "id": "123", "url": "https://...", "error": None}
 ```
 
-Then register it in `services/crm/factory.py`:
-
-```python
-if name == "my-crm":
-    return MyCrmAdapter()
-```
+3. Import + register in `services/crm/factory.py`
 
 ## Commands
 
@@ -127,7 +175,7 @@ if name == "my-crm":
 | `/crm` | Check which CRM is active + connectivity |
 | `/help` | List all commands |
 
-## Run with PM2 (Production)
+## Production
 
 ```bash
 pm2 start ecosystem.config.js

@@ -71,7 +71,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     store.reset(chat_id)
     provider = get_provider_name()
-    crm_name = "Zoho CRM" if provider == "zoho" else "GTM-OS"
+    display_names = {
+        "zoho": "Zoho CRM",
+        "hubspot": "HubSpot CRM",
+        "pipedrive": "Pipedrive CRM",
+        "salesforce": "Salesforce",
+        "bitrix24": "Bitrix24",
+        "bitrix": "Bitrix24",
+        "odoo": "Odoo CRM",
+        "gtm-os": "GTM-OS",
+    }
+    crm_name = display_names.get(provider, provider)
     await update.message.reply_text(
         f"👋 Hi! I'm your voice-to-CRM intake bot.\n\n"
         f"Connected to: *{crm_name}*\n\n"
