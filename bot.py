@@ -26,6 +26,11 @@ from services.crm_extractor import (
 )
 from services.crm.factory import get_adapter, adapter_info, get_provider_name
 from services.business_card import extract_lead_from_photo
+from services.field_menus import (
+    build_inline_keyboard,
+    get_menu_text,
+    is_menu_field,
+)
 
 load_dotenv()
 
@@ -204,12 +209,19 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     question = await generate_followup_question(lead_data, field, transcript)
 
     summary = await summarize_draft(lead_data)
-    text = (
-        f"I found this so far:\n\n{summary}\n\n"
-        f"⏳ I still need a few more details. {question}\n\n"
-        "(You can reply with text or send another voice memo.)"
-    )
-    await progress.edit_text(text)
+    
+    # Check if this field has a picklist menu
+    if is_menu_field(field):
+        menu_text = get_menu_text(field, question)
+        markup = build_inline_keyboard(field, lead_data.get(field))
+        await progress.edit_text(menu_text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        text = (
+            f"I found this so far:\n\n{summary}\n\n"
+            f"⏳ I still need a few more details. {question}\n\n"
+            "(You can reply with text or send another voice memo.)"
+        )
+        await progress.edit_text(text)
     return STATE_COLLECTING
 
 
@@ -259,12 +271,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     question = await generate_followup_question(lead_data, field, "Business card photo")
 
     summary = await summarize_draft(lead_data)
-    text = (
-        f"I read the card and found this:\n\n{summary}\n\n"
-        f"⏳ I still need a few more details. {question}\n\n"
-        "(Just reply with text.)"
-    )
-    await progress.edit_text(text)
+    
+    # Check if this field has a picklist menu
+    if is_menu_field(field):
+        menu_text = get_menu_text(field, question)
+        markup = build_inline_keyboard(field, lead_data.get(field))
+        await progress.edit_text(menu_text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        text = (
+            f"I read the card and found this:\n\n{summary}\n\n"
+            f"⏳ I still need a few more details. {question}\n\n"
+            "(Just reply with text.)"
+        )
+        await progress.edit_text(text)
     return STATE_COLLECTING
 
 
@@ -307,12 +326,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not missing:
             return await _send_confirm(update, context, chat_id)
 
+        # Ask next missing question — with menu if applicable
         next_field = missing[0]
         question = await generate_followup_question(lead, next_field, data["transcript"])
         summary = await summarize_draft(lead)
-        await update.message.reply_text(
-            f"👍\n\n{summary}\n\n❓ {question}"
-        )
+        
+        if is_menu_field(next_field):
+            menu_text = get_menu_text(next_field, question)
+            markup = build_inline_keyboard(next_field, lead.get(next_field))
+            await update.message.reply_text(menu_text, reply_markup=markup, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(
+                f"👍\n\n{summary}\n\n❓ {question}"
+            )
         return STATE_COLLECTING
 
     if state == STATE_CONFIRM:
@@ -391,6 +417,86 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     chat_id = query.message.chat.id
     data = query.data
+
+    # ── Handle field fill callbacks ──
+    if data.startswith("fill:"):
+        parts = data.split(":")
+        if len(parts) >= 3:
+            field_name = parts[1]
+            value = ":".join(parts[2:])  # handle values with colons
+            
+            lead = store.get(chat_id)["lead"]
+            
+            if value == "skip":
+                # Remove this field from missing list
+                missing = store.get(chat_id)["missing"]
+                if field_name in missing:
+                    missing.remove(field_name)
+                store.set_missing(chat_id, missing)
+                
+                # Ask next question
+                missing = store.get(chat_id)["missing"]
+                if not missing:
+                    return await _send_confirm(update, context, chat_id)
+                
+                next_field = missing[0]
+                question = await generate_followup_question(lead, next_field, store.get(chat_id)["transcript"])
+                summary = await summarize_draft(lead)
+                
+                if is_menu_field(next_field):
+                    menu_text = get_menu_text(next_field, question)
+                    markup = build_inline_keyboard(next_field, lead.get(next_field))
+                    await query.edit_message_text(menu_text, reply_markup=markup, parse_mode="Markdown")
+                else:
+                    await query.edit_message_text(
+                        f"👍\n\n{summary}\n\n❓ {question}",
+                        parse_mode="Markdown"
+                    )
+                return STATE_COLLECTING
+            
+            elif value == "type":
+                # User wants to type custom value — show summary and prompt for text
+                summary = await summarize_draft(lead)
+                prompt = (
+                    f"{summary}\n\n"
+                    f"✍️ Please type the {field_name.replace('_', ' ').title()}:\n"
+                    "(Send your reply as a text message)"
+                )
+                await query.edit_message_text(prompt, parse_mode="Markdown")
+                return STATE_COLLECTING
+            
+            else:
+                # User selected a picklist option
+                lead[field_name] = value
+                store.set_lead(chat_id, lead)
+                
+                # Ask next missing question
+                missing = get_missing_fields(lead)
+                store.set_missing(chat_id, missing)
+                
+                if not missing:
+                    summary = await summarize_draft(lead)
+                    await query.edit_message_text(
+                        f"✓ {field_name.replace('_', ' ').title()} set to *{value}*\n\n{summary}",
+                        parse_mode="Markdown"
+                    )
+                    return await _send_confirm(update, context, chat_id)
+                
+                next_field = missing[0]
+                question = await generate_followup_question(lead, next_field, store.get(chat_id)["transcript"])
+                summary = await summarize_draft(lead)
+                
+                if is_menu_field(next_field):
+                    menu_text = get_menu_text(next_field, question)
+                    markup = build_inline_keyboard(next_field, lead.get(next_field))
+                    await query.edit_message_text(menu_text, reply_markup=markup, parse_mode="Markdown")
+                else:
+                    await query.edit_message_text(
+                        f"✓ {field_name.replace('_', ' ').title()} set to *{value}*\n\n"
+                        f"{summary}\n\n❓ {question}",
+                        parse_mode="Markdown"
+                    )
+                return STATE_COLLECTING
 
     if data == "action:confirm":
         await query.edit_message_text("💾 Saving to CRM...")
