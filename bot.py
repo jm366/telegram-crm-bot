@@ -455,6 +455,11 @@ def main():
             MessageHandler(filters.PHOTO, handle_photo),
         ],
         states={
+            STATE_IDLE: [
+                MessageHandler(filters.VOICE | filters.AUDIO, handle_voice),
+                MessageHandler(filters.PHOTO, handle_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text),
+            ],
             STATE_COLLECTING: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text),
                 MessageHandler(filters.VOICE | filters.AUDIO, handle_voice),

@@ -87,7 +87,7 @@ async def extract_lead_from_photo(image_path: str) -> Tuple[Dict, str]:
                     },
                     {
                         "type": "image_url",
-                        "imageimage": {
+                        "image_url": {
                             "url": f"{mime_prefix}{b64_image}",
                         },
                     },
