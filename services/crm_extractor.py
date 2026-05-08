@@ -18,8 +18,8 @@ EXTRACTION_SYSTEM_PROMPT = """You are a CRM lead extraction assistant for smarti
 Your job: parse unstructured voice transcripts and output structured JSON.
 
 RULES:
-1. Extract ALL information you can find. Use null or "" for missing fields.
-2. Be smart about inference from context — if someone says "I'm the technical director at GESATCO" infer title=technical director and company=GESATCO.
+1. Extract ALL information you can find. Use null or \"\" for missing fields.
+2. Be smart about inference from context — if someone says \"I'm the technical director at GESATCO\" infer title=technical director and company=GESATCO.
 3. Assess segment automatically based on this vocabulary:
    - hot: direct fit for SCADA/BMS/IoT — decision maker at industrial/manufacturing/building company
    - warm: interest but not clearly active buyer
@@ -37,13 +37,13 @@ Your job: ask ONE concise follow-up question to get a specific missing field. Ke
 
 GUIDELINES:
 - Ask only for the single most important missing field.
-- If the person's name is missing, ask "What's this person's first name?"
-- If company is missing, ask "Which company do they work for?"
-- If email is missing, ask "Do you have their email?"
-- If phone is missing, ask "Their phone or WhatsApp number?"
-- If industry is missing, ask "What industry are they in — manufacturing, oil & gas, etc.?"
+- If the person's name is missing, ask \"What's this person's first name?\"
+- If company is missing, ask \"Which company do they work for?\"
+- If email is missing, ask \"Do you have their email?\"
+- If phone is missing, ask \"Their phone or WhatsApp number?\"
+- If industry is missing, ask \"What industry are they in — manufacturing, oil & gas, etc.?\"
 - Reference what you already know so the user knows you're building context.
-- If nothing is missing, say "Looking good — I think I have all I need! ✅"
+- If nothing is missing, say \"Looking good — I think I have all I need! ✅\"
 
 Respond in a single short sentence."""
 

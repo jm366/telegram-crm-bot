@@ -392,7 +392,7 @@ def main():
 
     app: Application = ApplicationBuilder().token(token).build()
 
-    conv_handler = Conversation(
+    conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
             MessageHandler(filters.VOICE | filters.AUDIO, handle_voice),
