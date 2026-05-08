@@ -24,7 +24,7 @@ from services.crm_extractor import (
     generate_followup_question,
     summarize_draft,
 )
-from services.crm_client import insert_lead
+from services.crm.factory import get_adapter, adapter_info, get_provider_name
 
 load_dotenv()
 
@@ -70,14 +70,18 @@ BASE_URL = os.getenv("GTMO_APP_URL", "https://samwise.yourdomain.com").rstrip("/
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     store.reset(chat_id)
+    provider = get_provider_name()
+    crm_name = "Zoho CRM" if provider == "zoho" else "GTM-OS"
     await update.message.reply_text(
-        "👋 Hi John Mark! I'm your smartics CRM intake bot.\n\n"
+        f"👋 Hi! I'm your voice-to-CRM intake bot.\n\n"
+        f"Connected to: *{crm_name}*\n\n"
         "Send me a voice memo about who you just met, and I'll:\n"
         "1. 🎙 Transcribe it\n"
         "2. 🧠 Extract lead info\n"
         "3. ❓ Ask for missing details\n"
         "4. 📝 Create a confirmed lead in your CRM\n\n"
-        "Try it now — record a voice message about someone you just spoke with!"
+        "Try it now — record a voice message about someone you just spoke with!\n\n"
+        "Commands: /help /status /crm"
     )
 
 
@@ -86,7 +90,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 Commands:\n"
         "/start — Start over\n"
         "/cancel — Cancel current intake\n"
-        "/status — What am I waiting for?\n\n"
+        "/status — What am I waiting for?\n"
+        "/crm — Check CRM connection\n\n"
         "Just send a voice memo anytime!"
     )
 
@@ -110,8 +115,17 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fields = ", ".join([k for k, v in lead.items() if v])
         await update.message.reply_text(f"Currently collecting. Got: {fields or 'nothing yet'}.\nStill need: {', '.join(missing) or 'nothing'}. Tell me more!")
     elif state == STATE_CONFIRM:
-        await update.message.reply_text("Waiting for your confirmation — check the draft above and tap Confirm or Edit.")
+        await update.message.reply_text("I'm waiting for your confirmation — check the draft above and tap Confirm or Edit.")
     return
+
+
+async def crm_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check which CRM is active and whether it's reachable."""
+    try:
+        info = await adapter_info()
+        await update.message.reply_text(f"🔗 {info}")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ CRM check failed: {e}")
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -316,18 +330,30 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("💾 Saving to CRM...")
         lead = store.get(chat_id)["lead"]
         try:
-            lead_id = insert_lead(lead)
-            crm_url = f"{BASE_URL}/leads/{lead_id}"
-            await query.edit_message_text(
-                f"✅ Lead saved!\n\n"
-                f"🔗 [Open in CRM]({crm_url})\n\n"
-                f"Send another voice memo anytime!"
-            )
-            # Also add a keyboard to let them add another easily
-            reply_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("➕ Add Another Lead", callback_data="action:new")]
-            ])
-            await context.bot.send_message(chat_id, "Ready next intake — record a new voice memo!", reply_markup=reply_markup)
+            adapter = await get_adapter()
+            result = await adapter.write_lead(lead)
+            if result["ok"]:
+                crm_url = result.get("url")
+                crm_id = result.get("id")
+                msg = (
+                    f"✅ Lead saved!\n\n"
+                    f"CRM ID: `{crm_id}`\n"
+                )
+                if crm_url:
+                    msg += f"🔗 [Open in CRM]({crm_url})\n\n"
+                msg += "Send another voice memo anytime!"
+                await query.edit_message_text(msg, parse_mode="Markdown")
+                # Also add a keyboard to let them add another easily
+                reply_markup = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Add Another Lead", callback_data="action:new")]
+                ])
+                await context.bot.send_message(chat_id, "Ready for next intake — record a new voice memo!", reply_markup=reply_markup)
+            else:
+                await query.edit_message_text(
+                    f"❌ CRM returned an error:\n_{result.get('error', 'Unknown error')}_\n\n"
+                    "You can try again or /cancel.",
+                    parse_mode="Markdown"
+                )
         except Exception as e:
             logger.error("Insert failed: %s", e)
             await query.edit_message_text(f"❌ Failed to save: {e}\nTry /cancel and start again.")
@@ -384,6 +410,7 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("crm", crm_status))
 
     logger.info("🚀 Telegram CRM Bot started")
     app.run_polling()
